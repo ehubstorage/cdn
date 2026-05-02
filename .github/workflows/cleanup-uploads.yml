@@ -1,0 +1,66 @@
+# .github/workflows/cleanup-uploads.yml
+
+name: Auto Cleanup Uploads
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'   # Runs every Sunday at midnight UTC
+  workflow_dispatch:        # Allows manual trigger from Actions tab
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Delete all files in uploads folder via API
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "📋 Fetching full file tree..."
+
+          BRANCH_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/ref/heads/main" | jq -r '.object.sha')
+
+          TREE_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/commits/$BRANCH_SHA" | jq -r '.tree.sha')
+
+          # Get all files in uploads/ recursively
+          FILES=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/trees/$TREE_SHA?recursive=1" \
+            | jq -r '.tree[] | select(.path | startswith("uploads/")) | select(.type == "blob") | select(.path | endswith(".gitkeep") | not) | .path')
+
+          FILE_COUNT=$(echo "$FILES" | grep -c . || true)
+          echo "Found $FILE_COUNT files in uploads/"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "✅ uploads/ is already empty!"
+            exit 0
+          fi
+
+          # Delete each file one by one
+          echo "$FILES" | while read -r FILE_PATH; do
+            FILE_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$REPO/contents/$FILE_PATH" | jq -r '.sha')
+
+            if [ "$FILE_SHA" = "null" ] || [ -z "$FILE_SHA" ]; then
+              echo "⚠️ Could not get SHA for $FILE_PATH, skipping"
+              continue
+            fi
+
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\": \"chore: delete $FILE_PATH [skip ci]\", \"sha\": \"$FILE_SHA\"}" \
+              "https://api.github.com/repos/$REPO/contents/$FILE_PATH")
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "🗑️ Deleted: $FILE_PATH"
+            else
+              echo "⚠️ Failed ($HTTP_STATUS): $FILE_PATH"
+            fi
+          done
+
+          echo "✅ Cleanup complete!"
