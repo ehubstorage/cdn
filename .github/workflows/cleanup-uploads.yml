@@ -10,30 +10,30 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-
-      - name: Delete all files in uploads/
+      - name: Cleanup uploads (index-only, no checkout)
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          shopt -s globstar nullglob
-          FILES=$(find uploads -type f ! -name '.gitkeep' 2>/dev/null || true)
-
-          if [ -z "$FILES" ]; then
-            echo "✅ uploads/ is already empty!"
-            exit 0
-          fi
-
-          COUNT=$(echo "$FILES" | wc -l)
-          echo "🗑️ Deleting $COUNT files..."
-
-          find uploads -type f ! -name '.gitkeep' -delete
-
+          set -e
+          git init -q repo && cd repo
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A uploads/
-          git commit -m "chore: cleanup uploads ($COUNT files) [skip ci]"
-          git push
 
-          echo "✅ Cleanup complete!"
+          for ATTEMPT in 1 2 3 4 5; do
+            # Fetch only commit + trees — zero file contents downloaded
+            git fetch -q --depth=1 --filter=blob:none origin main
+
+            # Load the latest tree into the index (no working-tree files created)
+            git read-tree FETCH_HEAD
+
+            COUNT=$(git ls-files -- 'uploads/' ':(exclude)uploads/.gitkeep' | wc -l)
+            if [ "$COUNT" -eq 0 ]; then
+              echo "✅ uploads/ is already empty!"
+              exit 0
+            fi
+            echo "🗑️ Attempt $ATTEMPT: deleting $COUNT files from $(git rev-parse --short FETCH_HEAD)..."
+
+            # Remove paths from the index only
+            git rm -r -q --cached -- 'u
