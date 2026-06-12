@@ -1,39 +1,41 @@
-name: Auto Cleanup Uploads
-on:
-  schedule:
-    - cron: '0 0 * * 0'
-  workflow_dispatch:
-
-jobs:
-  cleanup:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Cleanup uploads (index-only, no checkout)
+- name: Cleanup uploads (index-only, no checkout)
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -e
-          git init -q repo && cd repo
+          git init -q repo
+          cd repo
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          for ATTEMPT in 1 2 3 4 5; do
-            # Fetch only commit + trees — zero file contents downloaded
+          ATTEMPT=1
+          while [ "$ATTEMPT" -le 5 ]; do
             git fetch -q --depth=1 --filter=blob:none origin main
-
-            # Load the latest tree into the index (no working-tree files created)
             git read-tree FETCH_HEAD
 
-            COUNT=$(git ls-files -- 'uploads/' ':(exclude)uploads/.gitkeep' | wc -l)
+            COUNT=$(git ls-files -- uploads/ | grep -cv ".gitkeep" || true)
             if [ "$COUNT" -eq 0 ]; then
-              echo "✅ uploads/ is already empty!"
+              echo "uploads/ is already empty"
               exit 0
             fi
-            echo "🗑️ Attempt $ATTEMPT: deleting $COUNT files from $(git rev-parse --short FETCH_HEAD)..."
+            echo "Attempt $ATTEMPT: deleting $COUNT files"
 
-            # Remove paths from the index only
-            git rm -r -q --cached -- 'u
+            git ls-files -z -- uploads/ | grep -zv ".gitkeep" | xargs -0 -r git update-index --force-remove --
+
+            TREE=$(git write-tree)
+            COMMIT=$(git commit-tree "$TREE" -p FETCH_HEAD -m "chore: cleanup uploads ($COUNT files) [skip ci]")
+
+            if git push -q origin "$COMMIT:refs/heads/main"; then
+              echo "Cleanup complete"
+              exit 0
+            fi
+
+            echo "Push rejected, retrying"
+            sleep 2
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          echo "Failed after 5 attempts"
+          exit 1
